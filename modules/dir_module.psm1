@@ -78,6 +78,26 @@ function Format-Size {
     return $sizeStr
 }
 
+# Helper function to get just the numeric part of the formatted size (for right-alignment)
+function Get-SizeNumeric {
+    param([long]$size)
+    return $size.ToString("N0")
+}
+
+# Helper function to get just the parenthetical part of the formatted size (if applicable)
+function Get-SizeParenthetical {
+    param([long]$size)
+    if ($size -gt 1GB) {
+        $gbSize = [math]::Round($size / 1GB, 2)
+        return " ($($gbSize.ToString("N2")) GB)"
+    }
+    elseif ($size -gt 1MB) {
+        $mbSize = [math]::Round($size / 1MB, 2)
+        return " ($($mbSize.ToString("N2")) MB)"
+    }
+    return ""
+}
+
 #### Command-line functions ####
 
 # Function to delete all files and subdirectories in a specified directory
@@ -245,14 +265,14 @@ function lt {
         # Get all items and sort by modification time (oldest first)
         $items = @()
 
-        # Get directories first
-        $dirs = Get-ChildItem -Path $resolvedPath -Directory -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime
+        # Get directories first (including hidden)
+        $dirs = Get-ChildItem -Path $resolvedPath -Directory -Force -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime
         foreach ($dir in $dirs) {
             $items += $dir
         }
 
-        # Get files
-        $files = Get-ChildItem -Path $resolvedPath -File -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime
+        # Get files (including hidden)
+        $files = Get-ChildItem -Path $resolvedPath -File -Force -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime
         foreach ($file in $files) {
             $items += $file
         }
@@ -272,24 +292,48 @@ function lt {
             }
         }
 
-        # Add two spaces for padding
-        $columnWidth = $maxNameLength + 2
+        # Add three spaces for padding
+        $columnWidth = $maxNameLength + 3
+
+        # First pass: calculate all sizes to determine max width for right-alignment (numeric part only)
+        $itemSizes = @()
+        $itemSizesNumeric = @()
+        $itemSizesParenthetical = @()
+        foreach ($item in $items) {
+            $isFolder = $item -is [System.IO.DirectoryInfo]
+            if ($isFolder) {
+                $size = Get-FolderSize -folderPath $item.FullName
+            }
+            else {
+                $size = $item.Length
+            }
+            $sizeStr = Format-Size -size $size
+            $sizeNumeric = Get-SizeNumeric -size $size
+            $sizeParenthetical = Get-SizeParenthetical -size $size
+            $itemSizes += $sizeStr
+            $itemSizesNumeric += $sizeNumeric
+            $itemSizesParenthetical += $sizeParenthetical
+        }
+
+        # Calculate max numeric size string width
+        $maxSizeWidth = 0
+        foreach ($sizeNumeric in $itemSizesNumeric) {
+            if ($sizeNumeric.Length -gt $maxSizeWidth) {
+                $maxSizeWidth = $sizeNumeric.Length
+            }
+        }
 
         # Display the items
-        foreach ($item in $items) {
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $item = $items[$i]
             $lastWriteTime = $item.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
             $isFolder = $item -is [System.IO.DirectoryInfo]
 
-            # Calculate size
             if ($isFolder) {
                 $displayName = "[$($item.Name)]"
-                $size = Get-FolderSize -folderPath $item.FullName
-                $sizeStr = Format-Size -size $size
             }
             else {
                 $displayName = $item.Name
-                $size = $item.Length
-                $sizeStr = Format-Size -size $size
             }
 
             # Get the color for this item
@@ -298,10 +342,148 @@ function lt {
             # Display the name with appropriate color
             Write-Host "$displayName".PadRight($columnWidth) -ForegroundColor $color -NoNewline
 
-            # Display time and size in their original colors
-            Write-Host "  $lastWriteTime".PadRight(25) -NoNewline
-            Write-Host "  $sizeStr" -ForegroundColor Yellow
+            # Display time and right-aligned size in their original colors
+            Write-Host "$lastWriteTime" -NoNewline
+            Write-Host "   $($itemSizesNumeric[$i].PadLeft($maxSizeWidth))$($itemSizesParenthetical[$i])" -ForegroundColor Yellow
         }
+
+        Write-Host ""
+    }
+}
+
+# This displays a vertical list of folders and files sorted alphabetically with folders listed first.
+# Symbolic links and junctions are indicated in parentheses after the filename. After listing all items,
+# a summary line shows the total number of folders, files, and total size.
+
+function la {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Paths
+    )
+
+    # If no paths provided, use current directory
+    if ($Paths.Count -eq 0) {
+        $Paths = @(".")
+    }
+
+    foreach ($path in $Paths) {
+        # Validate that the path is a valid folder
+        if (-not (Test-Path -Path $path -PathType Container)) {
+            Write-Host "Error: '$path' is not a valid folder" -ForegroundColor Red
+            continue
+        }
+
+        $resolvedPath = Resolve-Path $path
+
+        # Get all items and sort alphabetically with folders first
+        $items = @()
+        $totalFolderCount = 0
+        $totalFileCount = 0
+        $totalSize = 0
+
+        # Get directories first, sorted alphabetically (including hidden)
+        $dirs = Get-ChildItem -Path $resolvedPath -Directory -Force -ErrorAction SilentlyContinue | Sort-Object -Property Name
+        foreach ($dir in $dirs) {
+            $items += $dir
+            $totalFolderCount++
+        }
+
+        # Get files, sorted alphabetically (including hidden)
+        $files = Get-ChildItem -Path $resolvedPath -File -Force -ErrorAction SilentlyContinue | Sort-Object -Property Name
+        foreach ($file in $files) {
+            $items += $file
+            $totalFileCount++
+        }
+
+        # Calculate the maximum width needed for the first column
+        $maxNameLength = 0
+        foreach ($item in $items) {
+            $isFolder = $item -is [System.IO.DirectoryInfo]
+            
+            if ($isFolder) {
+                $displayName = "[$($item.Name)]"
+            }
+            else {
+                $displayName = $item.Name
+            }
+            
+            # Add space for link type indicator if needed
+            if ($item.LinkType) {
+                $displayName += "  ($($item.LinkType))"
+            }
+            
+            $length = $displayName.Length
+            if ($length -gt $maxNameLength) {
+                $maxNameLength = $length
+            }
+        }
+
+        # Add three spaces for padding
+        $columnWidth = $maxNameLength + 3
+
+        # First pass: calculate all sizes to determine max width for right-alignment (numeric part only)
+        $itemSizes = @()
+        $itemSizesNumeric = @()
+        $itemSizesParenthetical = @()
+        $totalSize = 0
+        foreach ($item in $items) {
+            $isFolder = $item -is [System.IO.DirectoryInfo]
+            if ($isFolder) {
+                $size = Get-FolderSize -folderPath $item.FullName
+            }
+            else {
+                $size = $item.Length
+            }
+            $totalSize += $size
+            $sizeStr = Format-Size -size $size
+            $sizeNumeric = Get-SizeNumeric -size $size
+            $sizeParenthetical = Get-SizeParenthetical -size $size
+            $itemSizes += $sizeStr
+            $itemSizesNumeric += $sizeNumeric
+            $itemSizesParenthetical += $sizeParenthetical
+        }
+
+        # Calculate max numeric size string width
+        $maxSizeWidth = 0
+        foreach ($sizeNumeric in $itemSizesNumeric) {
+            if ($sizeNumeric.Length -gt $maxSizeWidth) {
+                $maxSizeWidth = $sizeNumeric.Length
+            }
+        }
+
+        # Display the items
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $item = $items[$i]
+            $lastWriteTime = $item.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+            $isFolder = $item -is [System.IO.DirectoryInfo]
+
+            if ($isFolder) {
+                $displayName = "[$($item.Name)]"
+            }
+            else {
+                $displayName = $item.Name
+            }
+
+            # Add link type indicator if present
+            if ($item.LinkType) {
+                $displayName += "  ($($item.LinkType))"
+            }
+
+            # Get the color for this item
+            $color = Get-ItemColor -itemName $item.Name -isFolder $isFolder -itemObj $item
+
+            # Display the name with appropriate color
+            Write-Host "$displayName".PadRight($columnWidth) -ForegroundColor $color -NoNewline
+
+            # Display time and right-aligned size in their original colors
+            Write-Host "$lastWriteTime" -NoNewline
+            Write-Host "   $($itemSizesNumeric[$i].PadLeft($maxSizeWidth))$($itemSizesParenthetical[$i])" -ForegroundColor Yellow
+        }
+
+        # Display summary line
+        Write-Host "--------------------"
+        Write-Host "Folders: $totalFolderCount  Files: $totalFileCount  Total size: $(Format-Size -size $totalSize)"
 
         Write-Host ""
     }
